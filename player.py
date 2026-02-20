@@ -1,6 +1,9 @@
+"""Plays back a list of KeyEvents on time: keyboard keys or Roblox MIDI Connect (numpad). Pause, seek, progress and visualizer signals."""
+
 from PyQt6.QtCore import QObject, pyqtSignal as Signal
 from pynput import keyboard
 from pynput.keyboard import Key, Controller
+import sys
 import time
 import threading
 import heapq
@@ -13,7 +16,42 @@ from core import TempoMap, KeyMapper
 from analysis import Humanizer, PedalGenerator
 import RobloxMidiConnect_encoder as rmc_encoder
 
+# Windows: higher timer resolution for more accurate sleep (1 ms).
+_winmm = None
+if sys.platform == "win32":
+    try:
+        import ctypes
+        _winmm = ctypes.windll.winmm
+    except Exception:
+        pass
+
+
+def _set_timer_resolution(ms: int = 1):
+    """Request OS timer period (e.g. 1 ms) for finer sleep granularity on Windows."""
+    if _winmm:
+        _winmm.timeBeginPeriod(ms)
+
+
+def _restore_timer_resolution(ms: int = 1):
+    """Restore timer resolution; pair with _set_timer_resolution in finally."""
+    if _winmm:
+        _winmm.timeEndPeriod(ms)
+
+
+def _precise_sleep(seconds: float):
+    """Busy-wait for short delays to avoid coarse sleep() granularity; use sleep for >2 ms remainder."""
+    if seconds <= 0:
+        return
+    deadline = time.perf_counter() + seconds
+    if seconds > 0.002:
+        time.sleep(seconds - 0.002)
+    while time.perf_counter() < deadline:
+        pass
+
+
 class Player(QObject):
+    """Runs compiled KeyEvents: humanize notes, compile list, then cursor loop (wait to next event, batch same-time events, execute). output_mode: 'key' or 'midi_numpad' (rmc)."""
+
     status_updated = Signal(str)
     progress_updated = Signal(float)
     playback_finished = Signal()
@@ -52,6 +90,7 @@ class Player(QObject):
             self.status_updated.emit(msg)
 
     def play(self):
+        """Humanize notes, compile events, optional countdown, then run cursor loop until stop or end."""
         try:
             self._log_debug("\n=== STARTING PLAYBACK PROCESS ===")
             humanized_notes = copy.deepcopy(self.notes)
@@ -139,6 +178,7 @@ class Player(QObject):
             time.sleep(1)
 
     def _compile_event_list(self, notes_to_play: List[Note], sections: List[MusicalSection]):
+        """Build sorted KeyEvents from notes (press/release) plus PedalGenerator events; optional mistakes."""
         self.key_states.clear()
         use_mistakes = self.config.get('enable_mistakes', False)
         mistake_chance = self.config.get('mistake_chance', 0) / 100.0
@@ -198,9 +238,20 @@ class Player(QObject):
         return random.choice(valid) if valid else None
 
     def _run_cursor_loop(self):
+        """Raise timer resolution, then run inner loop; restore resolution in finally."""
         self._log_debug("\n=== ENTERING CURSOR LOOP ===")
         self.current_section_idx = -1
-        
+        last_progress_emit = 0.0
+        progress_interval = 1.0 / 30.0   # Emit progress at ~30 Hz.
+
+        _set_timer_resolution(1)
+        try:
+            self._run_cursor_loop_inner(last_progress_emit, progress_interval)
+        finally:
+            _restore_timer_resolution(1)
+
+    def _run_cursor_loop_inner(self, last_progress_emit, progress_interval):
+        """Wait until next event time, collect all events within 0.5 ms, sort by priority, execute batch; emit progress at interval."""
         while not self.stop_event.is_set():
             if self.pause_event.is_set():
                 time.sleep(0.05)
@@ -208,7 +259,7 @@ class Player(QObject):
 
             now = time.perf_counter()
             playback_time = (now - self.start_time) - self.total_paused_time
-            
+
             next_sec_idx = self.current_section_idx + 1
             if next_sec_idx < len(self.sections):
                 if playback_time >= self.sections[next_sec_idx].start_time:
@@ -217,7 +268,7 @@ class Player(QObject):
                     self._log_debug(f"\n--- SECTION {next_sec_idx} | Time: {sec.start_time:.2f}s | Style: {sec.articulation_label.upper()} ---")
 
             if self.event_index >= len(self.compiled_events):
-                if playback_time > self.total_duration + 0.1: 
+                if playback_time > self.total_duration + 0.1:
                     if not self.pause_event.is_set():
                         self.last_pause_timestamp = now
                         self.pause_event.set()
@@ -227,27 +278,33 @@ class Player(QObject):
                     time.sleep(0.1)
                     continue
                 else:
-                    time.sleep(0.001)
+                    time.sleep(0.005)
                     continue
 
             next_event = self.compiled_events[self.event_index]
-            
-            if next_event.time <= playback_time:
-                batch = []
-                while self.event_index < len(self.compiled_events):
-                    e = self.compiled_events[self.event_index]
-                    if e.time <= playback_time:
-                        batch.append(e)
-                        self.event_index += 1
-                    else:
-                        break
-                
-                batch.sort(key=lambda x: x.priority)
-                self._execute_chord_event(batch, playback_time)
-            else:
-                time.sleep(0.001)
+            wait_time = next_event.time - playback_time
 
-            self.progress_updated.emit(playback_time)
+            if wait_time > 0:
+                _precise_sleep(wait_time)
+                now = time.perf_counter()
+                playback_time = (now - self.start_time) - self.total_paused_time
+
+            batch = []
+            while self.event_index < len(self.compiled_events):
+                e = self.compiled_events[self.event_index]
+                if e.time <= playback_time + 0.0005:
+                    batch.append(e)
+                    self.event_index += 1
+                else:
+                    break
+
+            if batch:
+                batch.sort(key=lambda x: x.priority)
+                self._execute_chord_event(batch, playback_time)   # key or midi_numpad per output_mode
+
+            if now - last_progress_emit >= progress_interval:
+                self.progress_updated.emit(playback_time)
+                last_progress_emit = now
 
     def _get_press_info_from_event(self, event: KeyEvent) -> Tuple[List[Key], str]:
         if event.pitch is None: return [], event.key_char
@@ -256,6 +313,7 @@ class Player(QObject):
         return key_data['modifiers'], key_data['key']
         
     def _execute_chord_event(self, events: List[KeyEvent], playback_time: float):
+        """Execute pedal then release then press for this time slice; dispatch to keyboard or rmc by output_mode."""
         if self.stop_event.is_set(): return
         press_events = [e for e in events if e.action == 'press']
         release_events = [e for e in events if e.action == 'release']

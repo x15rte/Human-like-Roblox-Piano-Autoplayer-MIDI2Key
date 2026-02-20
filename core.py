@@ -1,3 +1,5 @@
+"""MIDI parsing, tempo/beat mapping (TempoMap, GlobalTickMap), and pitch-to-key mapping (KeyMapper)."""
+
 import mido
 import bisect
 from collections import defaultdict
@@ -5,7 +7,9 @@ from typing import List, Tuple, Dict, Optional
 from models import Note, MidiTrack
 from pynput.keyboard import Key
 
+
 def get_time_groups(notes: List[Note], threshold: float = 0.015) -> List[List[Note]]:
+    """Group notes that start within threshold seconds of each other (e.g. chords)."""
     if not notes: return []
     groups, current_group = [], [notes[0]]
     for i in range(1, len(notes)):
@@ -16,19 +20,23 @@ def get_time_groups(notes: List[Note], threshold: float = 0.015) -> List[List[No
     groups.append(current_group)
     return groups
 
+
 class TempoMap:
+    """Maps time (seconds) to beats and back; tempo_events are (time_sec, tempo_micro), time_signatures (time, num, den)."""
+
     def __init__(self, tempo_events: List[Tuple[float, int]], time_signatures: List[Tuple[float, int, int]]):
         self.events = sorted(tempo_events, key=lambda x: x[0])
         self.time_signatures = sorted(time_signatures, key=lambda x: x[0])
-        self.beat_map = [] 
+        self.beat_map = []
         self._build_beat_map()
         self.has_explicit_time_signatures = len(time_signatures) > 0 and not (len(time_signatures) == 1 and time_signatures[0][0] == 0 and time_signatures[0][1] == 4)
 
     def _build_beat_map(self):
+        """Build (time_sec, beat, tempo) segments from tempo events (default 500000 µs/beat = 120 BPM)."""
         current_beat = 0.0
         last_time = 0.0
-        current_tempo = 500000 
-        
+        current_tempo = 500000
+
         if not self.events or self.events[0][0] > 0:
              self.beat_map.append((0.0, 0.0, current_tempo))
 
@@ -66,6 +74,7 @@ class TempoMap:
         return self.events[idx][1]
 
     def get_measure_boundaries(self, total_duration: float) -> List[Tuple[float, float]]:
+        """Return (start_time, end_time) for each measure up to total_duration using time signatures."""
         measures = []
         ts_events = self.time_signatures if self.time_signatures else [(0.0, 4, 4)]
         total_beats = self.time_to_beat(total_duration)
@@ -91,9 +100,12 @@ class TempoMap:
             measure_start_beat = measure_end_beat
         return measures
 
+
 class GlobalTickMap:
+    """Maps MIDI ticks to seconds using merged track messages (set_tempo, time_signature)."""
+
     def __init__(self, midi_file: mido.MidiFile):
-        self.tick_map = [] 
+        self.tick_map = []
         self.time_signatures = [] 
         self.ticks_per_beat = midi_file.ticks_per_beat or 480
         merged = mido.merge_tracks(midi_file.tracks)
@@ -124,7 +136,10 @@ class GlobalTickMap:
         delta_ticks = tick - last_tick
         return last_time + mido.tick2second(delta_ticks, self.ticks_per_beat, tempo)
 
+
 class MidiParser:
+    """Parse MIDI file into tracks and TempoMap; tempo_scale divides time (e.g. 2.0 = half speed)."""
+
     @staticmethod
     def parse_structure(filepath: str, tempo_scale: float = 1.0, debug_log: Optional[List[str]] = None) -> Tuple[List[MidiTrack], TempoMap]:
         try:
@@ -172,15 +187,17 @@ class MidiParser:
                 tracks.append(MidiTrack(i, track_name, program_change, is_drum, notes))
         return tracks, tempo_map
 
+
 class KeyMapper:
+    """Maps MIDI pitch to keyboard key (with modifiers). 88-key layout uses extra Ctrl ranges; 61-key is middle only."""
     SYMBOL_MAP = {'!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7', '*': '8', '(': '9', ')': '0'}
-    LEFT_CTRL_KEYS = "1234567890qwert" 
-    MIDDLE_WHITE_KEYS = "1234567890qwertyuiopasdfghjklzxcvbnm" 
-    RIGHT_CTRL_KEYS = "yuiopasdfghj"
-    PITCH_START_LEFT = 21 
-    PITCH_START_MIDDLE = 36 
-    PITCH_START_RIGHT = 97 
-    
+    LEFT_CTRL_KEYS = "1234567890qwert"   # Low octaves (Ctrl+key) for 88-key
+    MIDDLE_WHITE_KEYS = "1234567890qwertyuiopasdfghjklzxcvbnm"
+    RIGHT_CTRL_KEYS = "yuiopasdfghj"     # High octaves (Ctrl+key) for 88-key
+    PITCH_START_LEFT = 21   # A0
+    PITCH_START_MIDDLE = 36 # C2
+    PITCH_START_RIGHT = 97  # High range for 88-key
+
     def __init__(self, use_88_key_layout: bool = False):
         self.use_88_key_layout = use_88_key_layout
         self.key_map = {}

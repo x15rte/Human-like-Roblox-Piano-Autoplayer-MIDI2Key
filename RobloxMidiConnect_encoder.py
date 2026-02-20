@@ -1,3 +1,5 @@
+"""Encode MIDI note/velocity/pedal into 4 values 0–11 and send via numpad keys for Roblox MIDI Connect. Platform-specific VK codes."""
+
 import math
 import platform
 import ctypes
@@ -7,6 +9,7 @@ from pynput import keyboard as kb
 
 
 keyboard = kb.Controller()
+# Numpad key names for protocol alphabet: value 0–11 maps to numpad0–9, subtract, add.
 encoded_keys = [
     "numpad0",
     "numpad1",
@@ -23,6 +26,7 @@ encoded_keys = [
 ]
 
 
+# Platform-specific virtual key codes; "multiply" is the message prefix key.
 vk_keycodes = {
     "Windows": {
         "numpad0": 0x60,
@@ -72,15 +76,17 @@ vk_keycodes = {
 }
 
 CURRENT_PLATFORM = platform.system()
-_numlock_checked = False
+_numlock_checked = False   # Only ensure NumLock once per session.
 
 
 def _is_numlock_on_windows() -> bool:
+    """0x90 = VK_NUMLOCK; low bit set means key is on."""
     state = ctypes.windll.user32.GetKeyState(0x90)
     return bool(state & 1)
 
 
 def ensure_numlock_on() -> None:
+    """Turn NumLock on once so numpad keys send digits; Windows only, idempotent."""
     global _numlock_checked
     if _numlock_checked:
         return
@@ -97,6 +103,7 @@ def ensure_numlock_on() -> None:
 
 
 def _send_key(numpad_key_name: str) -> None:
+    """Send one key by VK code via pynput tap; no-op if platform unsupported or key unknown."""
     platform_map = vk_keycodes.get(CURRENT_PLATFORM)
     if not platform_map:
         return
@@ -110,6 +117,7 @@ def _send_key(numpad_key_name: str) -> None:
 
 
 def encode_and_send_message(a: int, b: int, c: int, d: int) -> None:
+    """Protocol: prefix with multiply key, then four keys for a,b,c,d (each clamped to 0–11)."""
     ensure_numlock_on()
 
     _send_key("multiply")
@@ -122,6 +130,7 @@ def encode_and_send_message(a: int, b: int, c: int, d: int) -> None:
 
 
 def _encode_note_components(note: int, velocity: int, is_note_off: bool) -> Tuple[int, int, int, int]:
+    """Note -> octave + note_in_octave (0–11); velocity -> two base-12 digits; note_off -> (0,0) for velocity pair."""
     octave_no = math.floor(note / 12)
     note_no = math.floor(note % 12)
 
@@ -137,14 +146,17 @@ def _encode_note_components(note: int, velocity: int, is_note_off: bool) -> Tupl
 
 
 def send_note_message(note: int, velocity: int, is_note_off: bool) -> None:
+    """Encode note/velocity/is_note_off and send via encode_and_send_message."""
     a, b, c, d = _encode_note_components(note, velocity, is_note_off)
     encode_and_send_message(a, b, c, d)
 
 
+# Protocol control code for sustain (CC 64); encoded as two base-12 digits.
 PEDAL_SENTINEL = 143
 
 
 def send_pedal(value: int) -> None:
+    """Encode control 143 + value (0–127) into four 0–11 digits and send."""
     value = max(0, min(127, value))
     control = PEDAL_SENTINEL
     a = math.floor(control / 12)
@@ -155,6 +167,7 @@ def send_pedal(value: int) -> None:
 
 
 def process_mido_message(msg) -> None:
+    """Dispatch note_on/note_off -> send_note_message, control_change 64 -> send_pedal; ignore clock."""
     msg_type = getattr(msg, "type", None)
     if msg_type == "clock":
         return

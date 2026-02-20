@@ -1,3 +1,5 @@
+"""Humanization (timing, articulation, chord roll), hand assignment, section analysis, and pedal event generation."""
+
 import random
 import heapq
 import numpy as np
@@ -6,7 +8,10 @@ from dataclasses import dataclass, field
 from models import Note, MusicalSection, KeyEvent, Finger
 from core import TempoMap, get_time_groups
 
+
 class Humanizer:
+    """Applies timing variance, articulation, chord roll, drift correction, and tempo rubato per section pace."""
+
     def __init__(self, config: Dict, debug_log: Optional[List[str]] = None):
         self.config = config
         self.debug_log = debug_log
@@ -14,12 +19,13 @@ class Humanizer:
         self.right_hand_drift = 0.0
 
     def apply_to_hand(self, notes: List[Note], hand: str, resync_points: Set[float]):
+        """Apply timing/articulation/roll per group; resync_points are times where both hands hit together (decay drift)."""
         if not any([self.config.get('vary_timing'), self.config.get('vary_articulation'), self.config.get('enable_drift_correction'), self.config.get('enable_chord_roll')]): return
-        
+
         time_groups = get_time_groups(notes)
         for group in time_groups:
             is_resync_point = round(group[0].start_time, 2) in resync_points
-            
+
             if self.config.get('enable_drift_correction') and is_resync_point:
                 if hand == 'left': self.left_hand_drift *= self.config.get('drift_decay_factor')
                 else: self.right_hand_drift *= self.config.get('drift_decay_factor')
@@ -53,6 +59,7 @@ class Humanizer:
                 else: self.right_hand_drift += group_timing_offset
 
     def apply_tempo_rubato(self, all_notes: List[Note], sections: List[MusicalSection]):
+        """Shift note times within each section by a sine curve; intensity scales by section pace (fast/slow)."""
         if not self.config.get('enable_tempo_sway'): return
         base_intensity = self.config.get('tempo_sway_intensity', 0.0)
         invert_sway = self.config.get('invert_tempo_sway', False)
@@ -70,8 +77,11 @@ class Humanizer:
                     time_shift = np.sin(rel_pos * np.pi) * intensity
                     note_map[note.id].start_time -= time_shift
 
+
 class FingeringEngine:
+    """Assigns left/right hand by pitch; chords use average pitch. Split at MIDI 60 (middle C)."""
     MAX_HAND_SPAN = 14
+
     def __init__(self):
         self.fingers = [Finger(id=i, hand='left') for i in range(5)] + [Finger(id=i, hand='right') for i in range(5, 10)]
 
@@ -83,21 +93,25 @@ class FingeringEngine:
 
     def _assign_single_note(self, note: Note):
         if note.hand != 'unknown': return
-        note.hand = 'left' if note.pitch < 60 else 'right'
+        note.hand = 'left' if note.pitch < 60 else 'right'  # 60 = middle C
 
     def _assign_chord(self, chord_notes: List[Note]):
         unassigned = [n for n in chord_notes if n.hand == 'unknown']
         if not unassigned: return
         avg_pitch = sum(n.pitch for n in unassigned) / len(unassigned)
-        hand = 'left' if avg_pitch < 60 else 'right'
+        hand = 'left' if avg_pitch < 60 else 'right'  # 60 = middle C
         for n in unassigned: n.hand = hand
 
+
 class SectionAnalyzer:
+    """Splits notes into sections by measures (if time sigs) or by grand pauses; classifies articulation and pace."""
+
     def __init__(self, notes: List[Note], tempo_map: TempoMap):
         self.notes = sorted(notes, key=lambda n: n.start_time)
         self.tempo_map = tempo_map
 
     def analyze(self) -> List[MusicalSection]:
+        """Use measure boundaries if time signatures exist, else segment by silence (>2 beats gap)."""
         if not self.notes: return []
         if self.tempo_map.has_explicit_time_signatures:
             return self._analyze_by_measures()
@@ -105,6 +119,7 @@ class SectionAnalyzer:
             return self._analyze_by_silence()
 
     def _analyze_by_silence(self) -> List[MusicalSection]:
+        """Segment at gaps > 2 beats; classify articulation (left-hand overlap ratio) and pace per section."""
         boundaries = self._detect_grand_pauses()
         sections = []
         for i in range(len(boundaries) - 1):
@@ -123,6 +138,7 @@ class SectionAnalyzer:
         return sections
 
     def _analyze_by_measures(self) -> List[MusicalSection]:
+        """Merge consecutive measures with same articulation/pace into sections."""
         total_dur = max(n.end_time for n in self.notes)
         measures = self.tempo_map.get_measure_boundaries(total_dur)
         sections = []
@@ -169,6 +185,7 @@ class SectionAnalyzer:
         return sections
 
     def _detect_grand_pauses(self) -> List[int]:
+        """Return note indices that start a new segment after a gap > 2 beats."""
         indices = [0]
         if not self.notes: return indices
         last_end_time = self.notes[0].end_time
@@ -185,6 +202,7 @@ class SectionAnalyzer:
         return indices
 
     def _classify_bass_articulation(self, notes: List[Note]) -> str:
+        """Legato / staccato / hybrid from left-hand note duration vs inter-onset ratio."""
         lh_notes = [n for n in notes if n.hand == 'left']
         if len(lh_notes) < 2: return 'legato'
         total_overlap = 0.0
@@ -208,6 +226,7 @@ class SectionAnalyzer:
         return 'hybrid'
 
     def _classify_pace_beats(self, notes: List[Note], start_beat: float, end_beat: float) -> str:
+        """Fast / slow / normal from notes per beat in the span."""
         duration_beats = end_beat - start_beat
         if duration_beats <= 0: return 'normal'
         npb = len(notes) / duration_beats
@@ -216,6 +235,8 @@ class SectionAnalyzer:
         return 'normal'
 
 class PedalGenerator:
+    """Produces pedal down/up KeyEvents. Styles: hybrid (adaptive), legato (harmonic), rhythmic (per chord), none."""
+
     @staticmethod
     def generate_events(config: Dict, final_notes: List[Note], sections: List[MusicalSection], debug_log: Optional[List[str]] = None) -> List[KeyEvent]:
         style = config.get('pedal_style')
@@ -256,10 +277,10 @@ class PedalGenerator:
     def _generate_adaptive_pedal_driver(driver_notes: List[Note]) -> List[KeyEvent]:
         events = []
         if not driver_notes: return events
-        
-        PEDAL_LAG = 0.05 
-        SAFE_INTERVALS = {0, 3, 4, 5, 7} # Unison, m3, M3, P4, P5, Octave(0)
-        UNSAFE_INTERVALS = {1, 6} # m2, Tritone
+
+        PEDAL_LAG = 0.05   # Seconds between pedal up and down when repedaling.
+        SAFE_INTERVALS = {0, 3, 4, 5, 7}   # Unison, m3, M3, P4, P5, octave; keep pedal.
+        UNSAFE_INTERVALS = {1, 6}          # m2, tritone; repedal to avoid clash.
 
         for i in range(len(driver_notes)):
             curr = driver_notes[i]
@@ -278,16 +299,15 @@ class PedalGenerator:
                     events.append(KeyEvent(next_n.start_time, 1, 'pedal', 'down'))
             else:
                 should_repedal = False
-                
-                # Harmonic Interval Check
+
                 if next_n:
                     interval = abs(next_n.pitch - curr.pitch) % 12
                     if interval in SAFE_INTERVALS:
-                        should_repedal = False # Lush/Consonant
+                        should_repedal = False   # Consonant; keep pedal.
                     elif interval in UNSAFE_INTERVALS:
-                        should_repedal = True # Clash/Dissonant
+                        should_repedal = True    # Dissonant; repedal.
                     else:
-                        should_repedal = False # Gray area -> Assume Safe
+                        should_repedal = False   # Gray area; assume safe.
                 
                 if should_repedal and next_n:
                     events.append(KeyEvent(next_n.start_time, 0, 'pedal', 'up'))
@@ -299,6 +319,7 @@ class PedalGenerator:
 
     @staticmethod
     def _generate_harmonic_pedal(events: List[KeyEvent], bass_notes: List[Note]):
+        """Pedal down at each bass note; up then down on harmony change or gap > 0.15s."""
         if not bass_notes: return
         current_bass_pitch = -1
         for i, note in enumerate(bass_notes):

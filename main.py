@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
+"""Jukebox GUI: MIDI file/track selection, humanization options, playback (key or Roblox MIDI Connect), hotkey, config persistence."""
+
 import sys
 import os
+import re
 import json
 import copy
 import threading
 from pathlib import Path
 from pynput import keyboard
-from pynput.keyboard import Key
+from pynput.keyboard import Key, KeyCode
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QCheckBox, QSlider, QLabel, QFileDialog,
                              QGroupBox, QTabWidget, QTextEdit, QComboBox, QDoubleSpinBox,
                              QMessageBox, QGridLayout, QStatusBar, QDialog, QTableWidget,
                              QTableWidgetItem, QHeaderView, QAbstractItemView, QDialogButtonBox,
                              QSizePolicy, QScrollArea, QRadioButton)
-from PyQt6.QtCore import QObject, QThread, pyqtSignal as Signal, Qt
+from PyQt6.QtCore import QObject, QThread, QByteArray, pyqtSignal as Signal, Qt
 from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import QTextBrowser
 import mido
@@ -26,12 +29,48 @@ from player import Player
 import RobloxMidiConnect_encoder as rmc_encoder
 
 APP_NAME = "Jukebox"
-APP_VERSION = "1.0.0"
 APP_ID = "jukebox.piano.roblox"
+
+
+def _get_git_version() -> str:
+    """Return short git rev (HEAD) for display; empty if not a repo or on error."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+APP_VERSION = _get_git_version()
 CONFIG_DIR_NAME = ".roblox_jukebox"
 APP_URL = "https://github.com/x15rte/Jukebox"
 
+
+def _parse_hotkey_string(s: str):
+    """Parse config string to pynput Key or KeyCode (special key name or single char); default Key.f6."""
+    if not s or not isinstance(s, str):
+        return Key.f6
+    s = s.strip().lower()
+    special = getattr(Key, s, None)
+    if special is not None:
+        return special
+    if len(s) == 1:
+        try:
+            return KeyCode.from_char(s)
+        except Exception:
+            pass
+    return Key.f6
+
+
 class HotkeyManager(QObject):
+    """Global hotkey listener: current_key triggers toggle; start_binding() captures next key and emits bound_updated."""
     toggle_requested = Signal()
     bound_updated = Signal(str)
 
@@ -57,7 +96,6 @@ class HotkeyManager(QObject):
             self.listening_for_bind = False
             self.bound_updated.emit(self._format_key_string(key))
             return
-
         if key == self.current_key:
             self.toggle_requested.emit()
 
@@ -65,6 +103,8 @@ class HotkeyManager(QObject):
         self.listening_for_bind = True
 
 class TrackSelectionDialog(QDialog):
+    """Table of tracks with Play checkbox and Hand (Auto/Left/Right); get_selection() returns (track, role) for checked rows."""
+
     def __init__(self, tracks, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Tracks & Assign Hands")
@@ -118,10 +158,12 @@ class TrackSelectionDialog(QDialog):
         return result
 
 class MainWindow(QMainWindow):
+    """Tabs: Playback (file, tracks, humanization), Visualizer (timeline + piano), Settings (hotkey, overlay), Output (log). Saves/loads config.json; optional log to file."""
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
-        self.setMinimumWidth(800)
+        self.setWindowTitle(f"{APP_NAME} ({APP_VERSION})" if APP_VERSION else APP_NAME)
+        self.setMinimumSize(800, 700)
         self.player_thread = None
         self.player = None
         self.midi_input_thread = None
@@ -156,7 +198,8 @@ class MainWindow(QMainWindow):
         self._live_mapper = KeyMapper(use_88_key_layout=self.use_88_key_check.isChecked())
         self.use_88_key_check.toggled.connect(self._rebuild_live_mapper)
 
-        self.add_log_message(f'{APP_NAME} v{APP_VERSION} — <a href="{APP_URL}">{APP_URL}</a>')
+        ver_tag = f" ({APP_VERSION})" if APP_VERSION else ""
+        self.add_log_message(f'{APP_NAME}{ver_tag} — <a href="{APP_URL}">{APP_URL}</a>')
 
     def _setup_ui(self):
         main_widget = QWidget()
@@ -170,12 +213,12 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(controls_tab, "Playback")
         self.tabs.addTab(visual_tab, "Visualizer")
         self.tabs.addTab(settings_tab, "Settings")
-        self.tabs.addTab(log_tab, "Debug")
+        self.tabs.addTab(log_tab, "Output")
 
-        # --- Visualizer Tab ---
+        # Visualizer tab: scrollable timeline + piano strip.
         vis_layout = QVBoxLayout(visual_tab)
         vis_layout.setContentsMargins(5, 5, 5, 5)
-        
+
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True) 
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
@@ -191,14 +234,13 @@ class MainWindow(QMainWindow):
         self.piano_widget = PianoWidget()
         vis_layout.addWidget(self.piano_widget)
 
-        # --- Controls Tab ---
+        # Playback tab: file group, playback options, humanization.
         controls_layout = QVBoxLayout(controls_tab)
         controls_layout.addWidget(self._create_file_group())
         controls_layout.addWidget(self._create_playback_group())
         controls_layout.addWidget(self._create_humanization_group())
         controls_layout.addStretch()
 
-        # --- Settings Tab ---
         settings_layout = QVBoxLayout(settings_tab)
         hk_group = QGroupBox("Hotkey")
         hk_layout = QHBoxLayout(hk_group)
@@ -209,6 +251,7 @@ class MainWindow(QMainWindow):
         hk_layout.addWidget(self.hk_btn)
         settings_layout.addWidget(hk_group)
 
+        # Settings: overlay (always on top, opacity).
         overlay_group = QGroupBox("Overlay Mode")
         ov_layout = QGridLayout(overlay_group)
         self.always_top_check = QCheckBox("Window Always on Top")
@@ -226,7 +269,6 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(overlay_group)
         settings_layout.addStretch()
 
-        # --- Log Tab ---
         self.log_output = QTextBrowser()
         self.log_output.setOpenExternalLinks(True)
         self.log_output.setFont(QFont("Courier", 9))
@@ -236,13 +278,18 @@ class MainWindow(QMainWindow):
         log_btn_layout = QHBoxLayout()
         clear_btn = QPushButton("Clear")
         copy_btn = QPushButton("Copy to Clipboard")
+        self.log_save_to_file_check = QCheckBox("Save log to file")
+        self.log_save_to_file_check.setChecked(False)
+        self.log_save_to_file_check.toggled.connect(self._on_log_save_to_file_toggled)
         clear_btn.clicked.connect(self.log_output.clear)
         copy_btn.clicked.connect(self._copy_log_to_clipboard)
         log_btn_layout.addWidget(clear_btn)
         log_btn_layout.addWidget(copy_btn)
+        log_btn_layout.addWidget(self.log_save_to_file_check)
+        log_btn_layout.addStretch()
         log_layout.addLayout(log_btn_layout)
 
-        # Main Action Buttons (Bottom)
+        # Bottom: time display, Play/Stop, Reset.
         media_layout = QHBoxLayout()
         self.time_label = QLabel("00:00 / 00:00")
         self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -270,7 +317,6 @@ class MainWindow(QMainWindow):
         self.play_button.setEnabled(False) 
         self.stop_button.setEnabled(False)
 
-    # --- Methods ---
     def _toggle_always_on_top(self, checked):
         flags = self.windowFlags()
         if checked: self.setWindowFlags(flags | Qt.WindowType.WindowStaysOnTopHint)
@@ -338,6 +384,7 @@ class MainWindow(QMainWindow):
             self.total_song_duration_sec = self.player.total_duration
         if not self.timeline_widget.is_dragging:
             self.timeline_widget.set_position(current_time)
+            self.piano_widget.update()
             self._update_time_label(current_time, self.total_song_duration_sec)
             timeline_width = self.timeline_widget.width()
             scroll_width = self.scroll_area.width()
@@ -452,6 +499,7 @@ class MainWindow(QMainWindow):
         try:
             names = mido.get_input_names()
         except Exception as e:
+            self.add_log_message(f"Failed to list MIDI input devices: {e}")
             QMessageBox.critical(self, "Error", f"Failed to list MIDI input devices:\n{e}")
             return
         self.midi_input_combo.clear()
@@ -466,6 +514,7 @@ class MainWindow(QMainWindow):
 
         port_name = self.midi_input_combo.currentText()
         if not port_name:
+            self.add_log_message("MIDI connect skipped: no device selected.")
             QMessageBox.warning(self, "No Device", "No MIDI input device selected.")
             return
 
@@ -761,12 +810,43 @@ class MainWindow(QMainWindow):
         self.select_all_humanization_check.setChecked(is_all_checked)
         self.select_all_humanization_check.blockSignals(False)
 
-    def add_log_message(self, message): self.log_output.append(message)
+    def _get_log_file_path(self):
+        return self.config_dir / "log.txt"
+
+    def _log_message_to_plain(self, message: str) -> str:
+        if not message:
+            return ""
+        text = re.sub(r"<[^>]+>", "", message)
+        try:
+            import html
+            text = html.unescape(text)
+        except Exception:
+            pass
+        return text.strip()
+
+    def _on_log_save_to_file_toggled(self, checked: bool):
+        if checked:
+            path = self._get_log_file_path()
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            self.add_log_message(f"Log is being saved to: {path}")
+
+    def add_log_message(self, message):
+        """Append to log widget; optionally append plain text to log.txt in config dir."""
+        self.log_output.append(message)
+        if self.log_save_to_file_check.isChecked():
+            path = self._get_log_file_path()
+            try:
+                self.config_dir.mkdir(parents=True, exist_ok=True)
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(self._log_message_to_plain(message) + "\n")
+            except Exception:
+                pass
 
     def set_controls_enabled(self, enabled):
         for groupbox in self.findChildren(QGroupBox): groupbox.setEnabled(enabled)
 
     def _save_config(self):
+        """Persist UI state to config.json (humanization, hotkey, geometry, etc.)."""
         display_text = self.pedal_style_combo.currentText()
         internal_style = self.pedal_mapping.get(display_text, 'hybrid')
         config = {
@@ -779,7 +859,7 @@ class MainWindow(QMainWindow):
             'select_all_humanization': self.select_all_humanization_check.isChecked(),
             'simulate_hands': self.all_humanization_checks['simulate_hands'].isChecked(),
             'enable_chord_roll': self.all_humanization_checks['enable_chord_roll'].isChecked(),
-            'vary_timing': self.all_humanization_checks['vary_timing'].isChecked(), 
+            'enable_vary_timing': self.all_humanization_checks['vary_timing'].isChecked(), 
             'value_timing_variance': self.all_humanization_spinboxes['vary_timing'].value(),
             'enable_vary_articulation': self.all_humanization_checks['vary_articulation'].isChecked(), 
             'value_articulation': self.all_humanization_spinboxes['vary_articulation'].value(),
@@ -791,7 +871,12 @@ class MainWindow(QMainWindow):
             'value_tempo_sway_intensity': self.all_humanization_spinboxes['tempo_sway'].value(),
             'invert_tempo_sway': self.all_humanization_checks['invert_tempo_sway'].isChecked(),
             'always_on_top': self.always_top_check.isChecked(),
-            'opacity': self.opacity_slider.value()
+            'opacity': self.opacity_slider.value(),
+            'hotkey': self.hotkey_manager._format_key_string(self.hotkey_manager.current_key),
+            'input_mode': 'piano' if self.input_mode_piano_radio.isChecked() else 'file',
+            'midi_input_device': self.midi_input_combo.currentText().strip() or None,
+            'window_geometry': self.saveGeometry().toBase64().data().decode('ascii'),
+            'save_log_to_file': self.log_save_to_file_check.isChecked()
         }
         try:
             with open(self.config_path, 'w') as f: json.dump(config, f, indent=4)
@@ -806,6 +891,7 @@ class MainWindow(QMainWindow):
         self.invert_sway_check.setEnabled(self.all_humanization_checks['tempo_sway'].isChecked())
 
     def _load_config(self):
+        """Restore UI from config.json; supports legacy keys (e.g. vary_timing)."""
         if not self.config_path.exists(): self._update_enabled_states(); return
         try:
             with open(self.config_path, 'r') as f: config = json.load(f)
@@ -824,7 +910,7 @@ class MainWindow(QMainWindow):
             self.select_all_humanization_check.setChecked(config.get('select_all_humanization', False))
             self.all_humanization_checks['simulate_hands'].setChecked(config.get('simulate_hands', False))
             self.all_humanization_checks['enable_chord_roll'].setChecked(config.get('enable_chord_roll', False))
-            self.all_humanization_checks['vary_timing'].setChecked(config.get('enable_vary_timing', False))
+            self.all_humanization_checks['vary_timing'].setChecked(config.get('enable_vary_timing', config.get('vary_timing', False)))
             self.all_humanization_spinboxes['vary_timing'].setValue(config.get('value_timing_variance', 0.010))
             self.all_humanization_checks['vary_articulation'].setChecked(config.get('enable_vary_articulation', False))
             self.all_humanization_spinboxes['vary_articulation'].setValue(config.get('value_articulation', 95.0))
@@ -837,11 +923,32 @@ class MainWindow(QMainWindow):
             self.all_humanization_checks['invert_tempo_sway'].setChecked(config.get('invert_tempo_sway', False))
             self.always_top_check.setChecked(config.get('always_on_top', False))
             self.opacity_slider.setValue(config.get('opacity', 100))
+            self._change_opacity(self.opacity_slider.value())
+            saved_hotkey = config.get('hotkey')
+            if saved_hotkey:
+                self.hotkey_manager.current_key = _parse_hotkey_string(saved_hotkey)
+                self.hk_label.setText(f"Start/Stop Hotkey: {self.hotkey_manager._format_key_string(self.hotkey_manager.current_key)}")
+            input_mode = config.get('input_mode', 'file')
+            self.input_mode_file_radio.setChecked(input_mode != 'piano')
+            self.input_mode_piano_radio.setChecked(input_mode == 'piano')
+            self._on_input_mode_changed()
+            midi_device = config.get('midi_input_device')
+            if midi_device:
+                self.midi_input_combo.setCurrentText(midi_device)
+            geom_b64 = config.get('window_geometry')
+            if geom_b64:
+                geom_data = QByteArray.fromBase64(geom_b64.encode('ascii'))
+                if not geom_data.isEmpty():
+                    self.restoreGeometry(geom_data)
+            self.log_save_to_file_check.setChecked(config.get('save_log_to_file', False))
+            if self.log_save_to_file_check.isChecked():
+                self.add_log_message(f"Log is being saved to: {self._get_log_file_path()}")
         except Exception: self._reset_controls_to_default()
         finally: self._update_enabled_states()
 
     def gather_config(self):
         if not self.selected_tracks_info:
+             self.add_log_message("Play aborted: no MIDI file or tracks selected.")
              QMessageBox.warning(self, "No Tracks", "Please select a MIDI file and choose tracks first."); return None
         display_text = self.pedal_style_combo.currentText()
         internal_style = self.pedal_mapping.get(display_text, 'hybrid')
@@ -883,6 +990,7 @@ class MainWindow(QMainWindow):
         try:
             tracks, tempo_map = MidiParser.parse_structure(filepath, 1.0, None)
         except Exception as e:
+            self.add_log_message(f"Failed to parse MIDI: {e}")
             QMessageBox.critical(self, "Error", f"Failed to parse MIDI:\n{e}")
             return
         dialog = TrackSelectionDialog(tracks, self)
@@ -921,6 +1029,7 @@ class MainWindow(QMainWindow):
                          elif role == "Right Hand": new_note.hand = 'right'
                          final_notes.append(new_note)
         except Exception as e:
+             self.add_log_message(f"Error preparing playback: {e}")
              QMessageBox.critical(self, "Error", f"Error preparing playback:\n{e}")
              return
 
@@ -982,6 +1091,7 @@ class MainWindow(QMainWindow):
         self.player_thread = None
 
     def closeEvent(self, event):
+        self._save_config()
         if self.midi_input_active:
             self._disconnect_midi_input()
         self._release_all_live_keys()
