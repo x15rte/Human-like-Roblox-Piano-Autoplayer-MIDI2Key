@@ -212,7 +212,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} ({APP_VERSION})" if APP_VERSION else APP_NAME)
-        self.setMinimumSize(800, 700)
+        self.setMinimumSize(780, 520)
         self.player_thread = None
         self.player = None
         self.midi_input_thread = None
@@ -256,10 +256,9 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
-        controls_tab, visual_tab, settings_tab, log_tab = QWidget(), QWidget(), QWidget(), QWidget()
+        controls_tab, visual_tab, log_tab = QWidget(), QWidget(), QWidget()
         self.tabs.addTab(controls_tab, "Playback")
         self.tabs.addTab(visual_tab, "Visualizer")
-        self.tabs.addTab(settings_tab, "Settings")
         self.tabs.addTab(log_tab, "Output")
 
         # Visualizer tab: scrollable timeline + piano strip.
@@ -281,40 +280,19 @@ class MainWindow(QMainWindow):
         self.piano_widget = PianoWidget()
         vis_layout.addWidget(self.piano_widget)
 
-        # Playback tab: file group, playback options, humanization.
-        controls_layout = QVBoxLayout(controls_tab)
-        controls_layout.addWidget(self._create_file_group())
-        controls_layout.addWidget(self._create_playback_group())
-        controls_layout.addWidget(self._create_humanization_group())
-        controls_layout.addStretch()
-
-        settings_layout = QVBoxLayout(settings_tab)
-        hk_group = QGroupBox("Hotkey")
-        hk_layout = QHBoxLayout(hk_group)
-        self.hk_label = QLabel(f"Start/Stop Hotkey: {self.hotkey_manager._format_key_string(self.hotkey_manager.current_key)}")
-        self.hk_btn = QPushButton("Change")
-        self.hk_btn.clicked.connect(self._change_hotkey)
-        hk_layout.addWidget(self.hk_label)
-        hk_layout.addWidget(self.hk_btn)
-        settings_layout.addWidget(hk_group)
-
-        # Settings: overlay (always on top, opacity).
-        overlay_group = QGroupBox("Overlay Mode")
-        ov_layout = QGridLayout(overlay_group)
-        self.always_top_check = QCheckBox("Window Always on Top")
-        self.always_top_check.toggled.connect(self._toggle_always_on_top)
-        
-        opacity_label = QLabel("Window Opacity:")
-        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.opacity_slider.setRange(20, 100)
-        self.opacity_slider.setValue(100)
-        self.opacity_slider.valueChanged.connect(self._change_opacity)
-        
-        ov_layout.addWidget(self.always_top_check, 0, 0, 1, 2)
-        ov_layout.addWidget(opacity_label, 1, 0)
-        ov_layout.addWidget(self.opacity_slider, 1, 1)
-        settings_layout.addWidget(overlay_group)
-        settings_layout.addStretch()
+        # Playback tab: left column = Input/Output + Humanization, right column = Settings (wider, less tall).
+        controls_main = QHBoxLayout(controls_tab)
+        left_column = QWidget()
+        left_layout = QVBoxLayout(left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(self._create_input_output_group())
+        self.humanization_group = self._create_humanization_group()
+        left_layout.addWidget(self.humanization_group)
+        left_layout.addStretch()
+        controls_main.addWidget(left_column, 1)
+        settings_group = self._create_settings_group()
+        settings_group.setMinimumWidth(260)
+        controls_main.addWidget(settings_group, 0)
 
         self.log_output = QTextBrowser()
         self.log_output.setOpenExternalLinks(True)
@@ -345,11 +323,9 @@ class MainWindow(QMainWindow):
         button_layout = QHBoxLayout()
         self.play_button = QPushButton("Play") 
         self.stop_button = QPushButton("Stop")
-        self.reset_button = QPushButton("Reset Defaults")
         button_layout.addWidget(self.play_button)
         button_layout.addWidget(self.stop_button)
         button_layout.addStretch()
-        button_layout.addWidget(self.reset_button)
         
         main_layout.addLayout(media_layout)
         main_layout.addLayout(button_layout)
@@ -360,7 +336,6 @@ class MainWindow(QMainWindow):
 
         self.play_button.clicked.connect(self.handle_play)
         self.stop_button.clicked.connect(self.handle_stop)
-        self.reset_button.clicked.connect(self._reset_controls_to_default)
         self.play_button.setEnabled(False) 
         self.stop_button.setEnabled(False)
 
@@ -472,22 +447,22 @@ class MainWindow(QMainWindow):
         spinbox.valueChanged.connect(lambda v: slider.setValue(int(v * factor)))
         return slider, spinbox
 
-    def _create_file_group(self):
-        group = QGroupBox("Input")
+    def _create_input_output_group(self):
+        group = QGroupBox("Input / Output")
         layout = QVBoxLayout(group)
 
-        mode_layout = QHBoxLayout()
+        mode_row = QHBoxLayout()
         mode_label = QLabel("Input Mode:")
         self.input_mode_file_radio = QRadioButton("File (MIDI)")
         self.input_mode_piano_radio = QRadioButton("Piano (MIDI In)")
         self.input_mode_file_radio.setChecked(True)
         self.input_mode_file_radio.toggled.connect(self._on_input_mode_changed)
         self.input_mode_piano_radio.toggled.connect(self._on_input_mode_changed)
-        mode_layout.addWidget(mode_label)
-        mode_layout.addWidget(self.input_mode_file_radio)
-        mode_layout.addWidget(self.input_mode_piano_radio)
-        mode_layout.addStretch(1)
-        layout.addLayout(mode_layout)
+        mode_row.addWidget(mode_label)
+        mode_row.addWidget(self.input_mode_file_radio)
+        mode_row.addWidget(self.input_mode_piano_radio)
+        mode_row.addStretch(1)
+        layout.addLayout(mode_row)
 
         self.file_input_widget = QWidget()
         file_layout = QVBoxLayout(self.file_input_widget)
@@ -529,12 +504,32 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.piano_input_widget)
         self.piano_input_widget.hide()
 
+        output_row = QHBoxLayout()
+        output_label = QLabel("Output Mode:")
+        self.output_mode_combo = QComboBox()
+        self.output_mode_combo.addItem("KEY Mode", userData="key")
+        self.output_mode_combo.addItem("MIDI Numpad Mode", userData="midi_numpad")
+        self.output_mode_combo.currentIndexChanged.connect(self._on_output_mode_changed)
+        output_row.addWidget(output_label)
+        output_row.addWidget(self.output_mode_combo)
+        output_row.addStretch(1)
+        layout.addLayout(output_row)
+
+        self.use_88_key_check = QCheckBox("Use 88-Key Extended Layout")
+        layout.addWidget(self.use_88_key_check)
+
         return group
 
     def _on_input_mode_changed(self):
         use_piano = self.input_mode_piano_radio.isChecked()
         self.file_input_widget.setVisible(not use_piano)
         self.piano_input_widget.setVisible(use_piano)
+        self._playback_file_only_widget.setVisible(not use_piano)
+        self.humanization_group.setVisible(not use_piano)
+        # Visualizer tab is only relevant for file playback; grey out when using Piano input.
+        self.tabs.setTabEnabled(1, not use_piano)
+        if use_piano and self.tabs.currentIndex() == 1:
+            self.tabs.setCurrentIndex(0)
 
         if use_piano:
             self._refresh_midi_inputs()
@@ -627,7 +622,13 @@ class MainWindow(QMainWindow):
                 return data
         return "key"
 
+    def _update_88_key_visibility(self):
+        """88-key layout only applies to KEY Mode; hide the option when using MIDI Numpad."""
+        if hasattr(self, "use_88_key_check"):
+            self.use_88_key_check.setVisible(self._current_output_mode() == "key")
+
     def _on_output_mode_changed(self):
+        self._update_88_key_visibility()
         if self.live_backend and self.midi_input_active:
             self.live_backend.shutdown()
             self.live_backend = create_backend(
@@ -668,22 +669,17 @@ class MainWindow(QMainWindow):
             else:
                 self.live_backend.pedal_off()
 
-    def _create_playback_group(self):
-        group = QGroupBox("Playback")
-        grid = QGridLayout(group)
+    def _create_settings_group(self):
+        group = QGroupBox("Settings")
+        main_layout = QVBoxLayout(group)
+
+        self._playback_file_only_widget = QWidget()
+        file_grid = QGridLayout(self._playback_file_only_widget)
         tempo_label = QLabel("Tempo")
         self.tempo_slider, self.tempo_spinbox = self._create_slider_and_spinbox(10.0, 200.0, 100.0, "%", factor=10.0, decimals=1)
-        grid.addWidget(tempo_label, 0, 0)
-        grid.addWidget(self.tempo_slider, 0, 2)
-        grid.addWidget(self.tempo_spinbox, 0, 3)
-
-        output_label = QLabel("Output Mode")
-        self.output_mode_combo = QComboBox()
-        self.output_mode_combo.addItem("KEY Mode", userData="key")
-        self.output_mode_combo.addItem("MIDI Numpad Mode", userData="midi_numpad")
-        self.output_mode_combo.currentIndexChanged.connect(self._on_output_mode_changed)
-        grid.addWidget(output_label, 1, 0)
-        grid.addWidget(self.output_mode_combo, 1, 2, 1, 2)
+        file_grid.addWidget(tempo_label, 0, 0)
+        file_grid.addWidget(self.tempo_slider, 0, 2)
+        file_grid.addWidget(self.tempo_spinbox, 0, 3)
 
         pedal_label = QLabel("Pedal Style")
         self.pedal_style_combo = QComboBox()
@@ -693,16 +689,43 @@ class MainWindow(QMainWindow):
         self.pedal_style_combo.setItemData(2, "Ignores note length. Holds pedal until harmony changes.", Qt.ItemDataRole.ToolTipRole)
         self.pedal_style_combo.setItemData(3, "Presses pedal only while keys are held down.", Qt.ItemDataRole.ToolTipRole)
         self.pedal_style_combo.setItemData(4, "Disables auto-pedal entirely.", Qt.ItemDataRole.ToolTipRole)
+        file_grid.addWidget(pedal_label, 1, 0)
+        file_grid.addWidget(self.pedal_style_combo, 1, 2, 1, 2)
 
-        grid.addWidget(pedal_label, 2, 0)
-        grid.addWidget(self.pedal_style_combo, 2, 2, 1, 2)
-        self.use_88_key_check = QCheckBox("Use 88-Key Extended Layout")
-        grid.addWidget(self.use_88_key_check, 3, 0, 1, 4)
+        countdown_row = QHBoxLayout()
         self.countdown_check = QCheckBox("3 second countdown")
-        self.debug_check = QCheckBox("Enable debug output")
-        grid.addWidget(self.countdown_check, 4, 0, 1, 4)
-        grid.addWidget(self.debug_check, 5, 0, 1, 4)
-        grid.setColumnStretch(2, 1)
+        countdown_row.addWidget(self.countdown_check)
+        countdown_row.addStretch()
+        self.reset_button = QPushButton("Reset Defaults")
+        self.reset_button.clicked.connect(self._reset_controls_to_default)
+        countdown_row.addWidget(self.reset_button)
+        file_grid.addLayout(countdown_row, 2, 0, 1, 4)
+        file_grid.setColumnStretch(2, 1)
+        main_layout.addWidget(self._playback_file_only_widget)
+
+        hk_group = QGroupBox("Hotkey")
+        hk_layout = QHBoxLayout(hk_group)
+        self.hk_label = QLabel(f"Start/Stop Hotkey: {self.hotkey_manager._format_key_string(self.hotkey_manager.current_key)}")
+        self.hk_btn = QPushButton("Change")
+        self.hk_btn.clicked.connect(self._change_hotkey)
+        hk_layout.addWidget(self.hk_label)
+        hk_layout.addWidget(self.hk_btn)
+        main_layout.addWidget(hk_group)
+
+        overlay_group = QGroupBox("Overlay Mode")
+        ov_layout = QGridLayout(overlay_group)
+        self.always_top_check = QCheckBox("Window Always on Top")
+        self.always_top_check.toggled.connect(self._toggle_always_on_top)
+        opacity_label = QLabel("Window Opacity:")
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(20, 100)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.valueChanged.connect(self._change_opacity)
+        ov_layout.addWidget(self.always_top_check, 0, 0, 1, 2)
+        ov_layout.addWidget(opacity_label, 1, 0)
+        ov_layout.addWidget(self.opacity_slider, 1, 1)
+        main_layout.addWidget(overlay_group)
+
         self._reset_playback_group_to_default()
         return group
 
@@ -767,7 +790,6 @@ class MainWindow(QMainWindow):
         self.pedal_style_combo.setCurrentText("Original (from MIDI)")
         self.use_88_key_check.setChecked(False)
         self.countdown_check.setChecked(True)
-        self.debug_check.setChecked(False)
 
     def _reset_humanization_group_to_default(self):
         self.all_humanization_spinboxes['vary_timing'].setValue(0.010)
@@ -835,7 +857,6 @@ class MainWindow(QMainWindow):
             'pedal_style': internal_style,
             'use_88_key_layout': self.use_88_key_check.isChecked(),
             'countdown': self.countdown_check.isChecked(),
-            'debug_mode': self.debug_check.isChecked(),
             'select_all_humanization': self.select_all_humanization_check.isChecked(),
             'simulate_hands': self.all_humanization_checks['simulate_hands'].isChecked(),
             'enable_chord_roll': self.all_humanization_checks['enable_chord_roll'].isChecked(),
@@ -881,12 +902,12 @@ class MainWindow(QMainWindow):
                 if self.output_mode_combo.itemData(i) == saved_output_mode:
                     self.output_mode_combo.setCurrentIndex(i)
                     break
+            self._update_88_key_visibility()
             internal_style = config.get('pedal_style', 'hybrid')
             display_text = self.pedal_mapping_inv.get(internal_style, "Original (from MIDI)")
             self.pedal_style_combo.setCurrentText(display_text)
             self.use_88_key_check.setChecked(config.get('use_88_key_layout', False))
             self.countdown_check.setChecked(config.get('countdown', True))
-            self.debug_check.setChecked(config.get('debug_mode', False))
             self.select_all_humanization_check.setChecked(config.get('select_all_humanization', False))
             self.all_humanization_checks['simulate_hands'].setChecked(config.get('simulate_hands', False))
             self.all_humanization_checks['enable_chord_roll'].setChecked(config.get('enable_chord_roll', False))
@@ -937,8 +958,7 @@ class MainWindow(QMainWindow):
             'tempo': self.tempo_spinbox.value(), 
             'countdown': self.countdown_check.isChecked(),
             'use_88_key_layout': self.use_88_key_check.isChecked(),
-            'pedal_style': internal_style, 
-            'debug_mode': self.debug_check.isChecked(),
+            'pedal_style': internal_style,
             'output_mode': self._current_output_mode(),
             'simulate_hands': self.all_humanization_checks['simulate_hands'].isChecked(),
             'vary_velocity': False,
@@ -968,7 +988,7 @@ class MainWindow(QMainWindow):
     def _parse_and_select_tracks(self, filepath):
         self.add_log_message("Parsing MIDI structure...")
         try:
-            tracks, tempo_map = MidiParser.parse_structure(filepath, 1.0, None)
+            tracks, tempo_map = MidiParser.parse_structure(filepath, 1.0)
         except Exception as e:
             self.add_log_message(f"Failed to parse MIDI: {e}")
             QMessageBox.critical(self, "Error", f"Failed to parse MIDI:\n{e}")
@@ -1010,17 +1030,15 @@ class MainWindow(QMainWindow):
         self.add_log_message("Preparing playback...")
         tempo_scale = config['tempo'] / 100.0
         try:
-             tracks, tempo_map = MidiParser.parse_structure(config['midi_file'], tempo_scale, None)
+             tracks, tempo_map = MidiParser.parse_structure(config['midi_file'], tempo_scale)
              selected_indices = [t.index for t, _ in self.selected_tracks_info]
              role_map = {t.index: r for t, r in self.selected_tracks_info}
              final_notes = []
              raw_pedal_events = []
-             if config.get('debug_mode'): self.add_log_message("\n=== RAW MIDI DATA (Selected Tracks) ===")
              for track in tracks:
                  raw_pedal_events.extend(track.pedal_events)
                  if track.index in selected_indices:
                      role = role_map[track.index]
-                     if config.get('debug_mode'): self.add_log_message(f"Track {track.index} ({track.name}): {len(track.notes)} Notes | Role: {role}")
                      for note in track.notes:
                          new_note = copy.deepcopy(note)
                          if role == "Left Hand": new_note.hand = 'left'
@@ -1048,11 +1066,7 @@ class MainWindow(QMainWindow):
         self.add_log_message("Analyzing musical structure...")
         analyzer = SectionAnalyzer(final_notes, tempo_map)
         sections = analyzer.analyze()
-        if config.get('debug_mode'):
-            self.add_log_message("\n=== MUSICAL STRUCTURE ANALYSIS ===")
-            for i, sec in enumerate(sections):
-                self.add_log_message(f"SECTION {i} [{sec.start_time:.2f}s - {sec.end_time:.2f}s] {sec.articulation_label}")
-                
+
         seek_ratio = 0.0
         if self.timeline_widget.total_duration > 0:
             seek_ratio = self.timeline_widget.current_time / self.timeline_widget.total_duration

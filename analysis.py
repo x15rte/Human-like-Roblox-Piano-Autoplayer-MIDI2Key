@@ -12,9 +12,8 @@ from core import TempoMap, get_time_groups
 class Humanizer:
     """Applies timing variance, articulation, chord roll, drift correction, and tempo rubato per section pace."""
 
-    def __init__(self, config: Dict, debug_log: Optional[List[str]] = None):
+    def __init__(self, config: Dict):
         self.config = config
-        self.debug_log = debug_log
         self.left_hand_drift = 0.0
         self.right_hand_drift = 0.0
 
@@ -238,7 +237,7 @@ class PedalGenerator:
     """Produces pedal down/up KeyEvents. Styles: original (from MIDI), hybrid (adaptive), legato (harmonic), rhythmic (per chord), none."""
 
     @staticmethod
-    def generate_events(config: Dict, final_notes: List[Note], sections: List[MusicalSection], debug_log: Optional[List[str]] = None) -> List[KeyEvent]:
+    def generate_events(config: Dict, final_notes: List[Note], sections: List[MusicalSection]) -> List[KeyEvent]:
         style = config.get('pedal_style')
         if style == 'none': return []
 

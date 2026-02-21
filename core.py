@@ -145,8 +145,7 @@ class MidiParser:
     """Parse a MIDI file into :class:`MidiTrack` objects and a :class:`TempoMap`."""
 
     @staticmethod
-    def parse_structure(filepath: str, tempo_scale: float = 1.0,
-                        debug_log: Optional[List[str]] = None,
+    def parse_structure(filepath: str, tempo_scale: float = 1.0
                         ) -> Tuple[List[MidiTrack], TempoMap]:
         try:
             mid = mido.MidiFile(filepath)
